@@ -1,0 +1,19 @@
+# COCO 2017 dataset http://cocodataset.org
+
+# train and val data as 1) directory: path/images/, 2) file: path/images.txt, or 3) list: [path1/images/, path2/images/]
+train: /data/dataset/bbu_training_data/bbu_and_shield/train
+val: /data/dataset/bbu_training_data/bbu_and_shield/val
+# test: /data/dataset/bbu_training_data/bbu_and_shield/test
+
+# number of classes
+nc: 5
+
+# class names
+names:
+  [
+    "huawei_bbu",
+    "alx_bbu",
+    "huawei_shield",
+    "zhongxing_bbu",
+    "zhongxing_shield",
+  ]
