@@ -261,3 +261,12 @@ com_crashlytics_export_strings.xml
 crashlytics.properties
 crashlytics-build.properties
 fabric.properties
+
+# All the yaml files, ckpt pth checkpoints, and tensorboard logs
+*.yaml
+*.ckpt
+*.pth
+*.log
+
+# Tensorboard logs
+events.out.tfevents*

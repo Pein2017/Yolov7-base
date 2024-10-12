@@ -1,0 +1,133 @@
+# Python AI Development Guidelines
+
+## Objective
+Provide comprehensive guidelines for Python-based AI development projects, ensuring best practices in code quality, hyperparameter tuning, multi-GPU training, logging, testing, debugging, and project organization.
+
+## Key Components
+1. **Coding Standards and Best Practices**
+2. **Hyperparameter Tuning Integration**
+3. **Multi-GPU Training and Process Management**
+4. **Logging and Monitoring**
+5. **Code Organization and Reusability**
+6. **Performance Optimization**
+7. **Testing and Debugging**
+8. **Documentation and Maintainability**
+
+## Tasks
+
+### 1. Coding Standards and Best Practices
+- **Type Hints**: Use Python type hints for functions and variables to enhance clarity and support static analysis.
+- **Naming Conventions**: 
+  - Lowercase with underscores for variables and functions.
+  - CamelCase for class names.
+- **Readability**: Maintain consistent indentation and spacing. Write clear comments and docstrings for complex logic.
+- **Modularity**: Develop modular components to enhance reusability and maintainability. Decouple complex functions into smaller units.
+- **Reduce Redundancy**: Abstract common functionalities into utility modules or functions to avoid code duplication.
+
+### 2. Hyperparameter Tuning Integration
+- **Framework**: Incorporate Optuna for hyperparameter optimization.
+- **Backend**: Use MySQL to store study data.
+- **Search Space**: Define comprehensive search spaces for parameters like learning rate, batch size, and number of layers.
+- **Unique Trials**: Ensure each training run is uniquely associated with an Optuna trial to prevent overlaps.
+- **Result Logging**: Persist study results and metrics in the MySQL backend for analysis.
+
+### 3. Multi-GPU Training and Process Management
+- **Framework Choice**: Utilize PyTorch Lightning for streamlined and scalable multi-GPU training.
+- **Dispatcher**: Implement a dispatcher to launch training processes across multiple GPUs.
+- **GPU Assignment**: Allocate hyperparameters and assign specific GPUs to each process for optimal resource utilization.
+- **Device Allocation**: Manage dynamic device allocation and track process statuses to ensure efficient execution.
+- **Inter-Process Communication**: Facilitate communication between processes for coordinated result logging and monitoring.
+
+### 4. Logging and Monitoring
+- **Logger Integration**: Use Python’s `logging` module to log information to files instead of `print` statements for better traceability and debugging.
+- **Log Management**: Utilize log rotation to manage file sizes and maintain historical logs.
+
+### 5. Code Organization and Reusability
+- **Directory Structure**: Organize code into clear and logical directories such as `trainer`, `model`, `dataset`, `utils`, `scripts`, and `logs`.
+- **Reusable Modules**: Create utility modules for commonly used functions and classes to promote reusability.
+- **Configuration Management**: 
+  - Store configuration parameters separately in a custom `Args` class to allow easy adjustments without modifying core code.
+  - Implement a flexible configuration system using the `Args` class:
+    - Create a custom `Args` class with attributes matching configuration parameters.
+    - Use type hints for each attribute to enhance clarity and support static analysis.
+  - Provide a unified interface to access parameters (e.g., `args.lr`) throughout the codebase.
+  - Allow easy modification of configuration parameters by updating the `Args` class or its instances.
+
+### 6. Performance Optimization
+- **Efficient Data Loading**: Optimize data pipelines to prevent bottlenecks using asynchronous loading and prefetching.
+- **Parallel Processing**: Leverage multiprocessing and multithreading where appropriate to enhance performance.
+- **Resource Management**: Monitor and manage CPU, GPU, and memory usage to ensure efficient utilization.
+- **Profiling and Benchmarking**: Regularly profile the code to identify and address performance bottlenecks.
+
+### 7. Testing and Debugging
+- **Automated Testing**: Implement unit and integration tests to ensure code reliability.
+- **Debugging Practices**: Use debugging tools and structured logging to identify and resolve issues efficiently.
+- **Continuous Integration**: Integrate CI/CD pipelines to automate testing and ensure code quality.
+
+### 8. Documentation and Maintainability
+- **Docstrings and Comments**: Provide comprehensive docstrings for all modules, classes, and functions. Use comments to explain non-trivial code sections.
+- **README and Usage Guides**: Maintain up-to-date README files with setup instructions, usage guides, and project structure explanations.
+- **Maintainability**: Ensure code is easy to understand and modify for future development.
+
+## Commenting Guidelines
+When adding comments, follow these guidelines:
+- **Clarity and Conciseness**: Use clear and concise language.
+- **Avoid Redundancy**: Do not state the obvious (e.g., avoid restating what the code does).
+- **Focus on Purpose**: Emphasize the "why" and "how" rather than just the "what".
+- **Comment Types**:
+  - **Single-Line Comments**: Use for brief explanations.
+  - **Multi-Line Comments**: Use for longer explanations or detailed descriptions of functions and classes.
+
+## Best Practices
+- **Modularity**: Design systems with modular components to enhance reusability and ease of maintenance.
+- **Type Safety**: Use type hints to enforce type safety and improve code intelligibility.
+- **Logging Over Printing**: Implement structured logging for better monitoring and debugging capabilities.
+- **Decoupling**: Keep complex functions and components decoupled to simplify testing and future enhancements.
+- **Continuous Integration**: Integrate CI/CD pipelines to automate testing, building, and deployment processes.
+- **Version Control**: Use Git with clear commit messages and branching strategies to manage code changes effectively.
+- **Security**: Implement security best practices, including secure handling of credentials and data encryption where necessary.
+
+## Implementation Notes
+- **Generate Relevant Code**: Focus on generating only necessary code sections for changes or additions to maintain clarity.
+- **Maintain Clarity and Efficiency**: Prioritize writing clear and efficient code to facilitate understanding and future maintenance.
+- **Leverage Existing Modules**: Utilize established modules and libraries to build upon proven functionalities and reduce development time.
+- **Standard Routines**: Establish standardized development routines to ensure consistency and scalability across projects.
+
+## Folder Structure Reference
+
+```
+/project_root
+├── analysis
+├── data_factory.log
+├── dataset
+│   ├── __init__.py
+│   ├── data_factory.ipynb
+│   └── data_factory.py
+├── ltn_logs
+├── logs
+├── model
+│   ├── __init__.py
+│   ├── classifier_1.py
+│   └── classifier_2.py
+├── plots
+├── scripts
+├── test.log
+├── train_logs
+├── train_optuna.py
+├── trainer
+│   ├── __init__.py
+│   ├── base_ltn.py
+│   ├── bbu_ltn.py
+│   ├── trainer_backup.py
+│   └── utils.py
+└── utils
+    └── ...
+```
+
+- **analysis**: Scripts and notebooks for data analysis and visualization.
+- **dataset**: Data processing scripts and datasets.
+- **logs**: Log files generated during training and analysis.
+- **model**: Model architectures and related scripts.
+- **scripts**: Utility and setup scripts.
+- **trainer**: Training scripts and utilities specific to model training.
+- **utils**: Utility modules and helper functions used across the project.
