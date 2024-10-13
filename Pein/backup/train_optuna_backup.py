@@ -12,8 +12,8 @@ from optuna.study import Study
 from optuna.trial import FrozenTrial, TrialState
 from pytorch_lightning import seed_everything
 
-from dataset.data_factory import get_dataloader
-from model.classifier_2 import DetectionClassificationModel
+from data.data_factory import get_dataloader
+from models.classifier_2 import DetectionClassificationModel
 from trainer.bbu_ltn import DetectLtnModule
 from trainer.utils import (
     Args,

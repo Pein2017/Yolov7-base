@@ -1,4 +1,53 @@
 import logging
+import sys
+from logging.handlers import QueueHandler, RotatingFileHandler
+from multiprocessing import Queue
+
+
+def worker_logging_configurer(queue: Queue):
+    """Configure logging for worker processes."""
+    handler = QueueHandler(queue)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+
+
+def setup_global_logger(name: str, log_file: str, level=logging.INFO):
+    """Set up a global logger."""
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(level)
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(level)
+
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    return logger
+
+
+def setup_file_logger(log_file: str = "logs/training.log"):
+    """Set up a file logger with rotating file handler."""
+    logger = logging.getLogger("file_logger")
+    logger.setLevel(logging.INFO)
+
+    handler = RotatingFileHandler(log_file, maxBytes=10**6, backupCount=5)
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    handler.setFormatter(formatter)
+
+    if not logger.handlers:
+        logger.addHandler(handler)
+
+    return logger
 
 
 def setup_logger(
@@ -18,7 +67,6 @@ def setup_logger(
     - logger: A configured logger instance.
     """
     # Convert string level to logging level
-    level = level.lower()
     level_mapping = {
         "debug": logging.DEBUG,
         "info": logging.INFO,
@@ -27,17 +75,15 @@ def setup_logger(
         "critical": logging.CRITICAL,
     }
 
-    if level not in level_mapping:
+    if level.lower() not in level_mapping:
         raise ValueError(
             f"Invalid log level: {level}. Choose from 'debug', 'info', 'warning', 'error', 'critical'."
         )
 
-    log_level = level_mapping[level]
+    log_level = level_mapping[level.lower()]
 
     # Create a logger
     logger = logging.getLogger(name)
-
-    # Set the logging level for the logger
     logger.setLevel(log_level)
 
     # Set the file mode to 'w' for overwrite, 'a' for append

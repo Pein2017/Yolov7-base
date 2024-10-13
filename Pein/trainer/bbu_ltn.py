@@ -9,19 +9,8 @@ from pytorch_lightning.callbacks import EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch import nn
 
-from .base_ltn import LtnBaseModule, Phase
-from .utils import Args  # Remove setup_callbacks from this import
-
-# Remove or comment out the setup of individual log files
-# from utils.setup import setup_logger
-
-# Remove individual logger setup
-# logger = setup_logger(
-#     log_file="bbu_ltn.log",
-#     level="info",
-#     name="trainer_logger",
-#     log_to_console=True,
-# )
+from trainer.base_ltn import LtnBaseModule, Phase
+from utils import Args  # Updated import
 
 logger = logging.getLogger("train_optuna")
 

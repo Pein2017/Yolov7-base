@@ -12,6 +12,7 @@ Provide comprehensive guidelines for Python-based AI development projects, ensur
 6. **Performance Optimization**
 7. **Testing and Debugging**
 8. **Documentation and Maintainability**
+9. **Language Use**
 
 ## Tasks
 
@@ -43,7 +44,14 @@ Provide comprehensive guidelines for Python-based AI development projects, ensur
 - **Log Management**: Utilize log rotation to manage file sizes and maintain historical logs.
 
 ### 5. Code Organization and Reusability
-- **Directory Structure**: Organize code into clear and logical directories such as `trainer`, `model`, `dataset`, `utils`, `scripts`, and `logs`.
+- **Directory Structure**: Organize code into clear and logical directories:
+  - `trainer`: Training scripts and utilities specific to model training.
+  - `models`: Model architectures and related scripts.
+  - `data`: Data processing scripts and datasets.
+  - `utils`: Utility modules and helper functions used across the project.
+  - `optim`: Hyperparameter tuning scripts and callbacks.
+  - `utils`: Helper functions and utility modules.
+  - `logs`, `scripts`, `dataset`, etc., as necessary.
 - **Reusable Modules**: Create utility modules for commonly used functions and classes to promote reusability.
 - **Configuration Management**: 
   - Store configuration parameters separately in a custom `Args` class to allow easy adjustments without modifying core code.
@@ -68,6 +76,10 @@ Provide comprehensive guidelines for Python-based AI development projects, ensur
 - **Docstrings and Comments**: Provide comprehensive docstrings for all modules, classes, and functions. Use comments to explain non-trivial code sections.
 - **README and Usage Guides**: Maintain up-to-date README files with setup instructions, usage guides, and project structure explanations.
 - **Maintainability**: Ensure code is easy to understand and modify for future development.
+
+### 9. Language Use
+- **Default Language**: All code, comments, and documentation should be written in English by default.
+- **Special Cases**: For scenarios requiring a different language, clearly document the reason and ensure consistency across the project.
 
 ## Commenting Guidelines
 When adding comments, follow these guidelines:
@@ -95,39 +107,84 @@ When adding comments, follow these guidelines:
 
 ## Folder Structure Reference
 
-```
-/project_root
-├── analysis
-├── data_factory.log
-├── dataset
-│   ├── __init__.py
-│   ├── data_factory.ipynb
-│   └── data_factory.py
-├── ltn_logs
-├── logs
-├── model
-│   ├── __init__.py
-│   ├── classifier_1.py
-│   └── classifier_2.py
-├── plots
-├── scripts
-├── test.log
-├── train_logs
-├── train_optuna.py
-├── trainer
-│   ├── __init__.py
-│   ├── base_ltn.py
-│   ├── bbu_ltn.py
-│   ├── trainer_backup.py
-│   └── utils.py
-└── utils
-    └── ...
-```
+### Directory Descriptions
 
-- **analysis**: Scripts and notebooks for data analysis and visualization.
-- **dataset**: Data processing scripts and datasets.
-- **logs**: Log files generated during training and analysis.
-- **model**: Model architectures and related scripts.
-- **scripts**: Utility and setup scripts.
-- **trainer**: Training scripts and utilities specific to model training.
-- **utils**: Utility modules and helper functions used across the project.
+- **data/**
+  - **Purpose**: Manage all data-related functionalities, including dataset creation, preprocessing, and DataLoader configurations.
+  - **Key Files**:
+    - `data_factory.py`: Handles the creation of datasets and DataLoader instances.
+    - `custom_dataset.py`: Contains customized `Dataset` classes tailored to specific data structures and requirements.
+    - `__init__.py`: Makes the directory a Python package.
+
+- **logs/**
+  - **Purpose**: Store log files generated during training, validation, and other processes for monitoring and debugging.
+  - **Key Files**:
+    - `training.log`: Logs related to the training process.
+    - Additional log files as needed.
+  
+- **models/**
+  - **Purpose**: Define individual model architectures as separate PyTorch modules.
+  - **Key Files**:
+    - `model_x.py`, `model_y.py`: Specific model implementations, each directly inheriting from `torch.nn.Module`.
+    - `__init__.py`: Makes the directory a Python package and can be used to import models conveniently.
+
+- **optim/**
+  - **Purpose**: Manage optimization-related scripts, including hyperparameter tuning, callbacks, and logging functionalities.
+  - **Potential Files**:
+    - Files related to callbacks
+    - Logging or logger implementations
+    - Optuna-related scripts for objective functions and search space definitions
+    - `__init__.py`: Makes the directory a Python package
+  - **Note**: The exact structure and file names in this directory may evolve based on project needs and optimization strategies.
+
+- **scripts/**
+  - **Purpose**: Contain executable scripts for various tasks such as training, evaluation, and deployment.
+  - **Key Files**:
+    - `train_optuna.py`: Script to initiate training with Optuna integration for hyperparameter tuning.
+    - Additional scripts as necessary.
+  
+- **trainer/**
+  - **Purpose**: Include training modules and utilities specific to model training using frameworks like PyTorch Lightning.
+  - **Key Files**:
+    - `base_ltn.py`: Base Lightning module providing shared training functionalities.
+    - `xxx_ltn.py`: Custom Lightning modules inheriting from the base for specific training behaviors.
+    - `__init__.py`: Makes the directory a Python package.
+
+- **utils/**
+  - **Purpose**: Provide utility modules and helper functions used across the project to promote reusability and reduce redundancy.
+  - **Key Files**:
+    - `config.py`: Manages configuration settings using classes like `Args` for easy parameter adjustments.
+    - `helpers.py`: Contains reusable helper functions and utilities.
+    - `setup.py`: Setup utilities and environment configurations.
+    - `__init__.py`: Makes the directory a Python package.
+
+- **tests/**
+  - **Purpose**: Store unit and integration tests to ensure code reliability and correctness.
+  - **Key Files**:
+    - `test_models.py`: Tests for model implementations.
+    - `test_trainer.py`: Tests for trainer modules and training processes.
+    - Additional test files as necessary.
+  
+- **README.md**
+  - **Purpose**: Provide an overview of the project, including setup instructions, usage guides, and explanations of the project structure.
+
+- **requirements.txt**
+  - **Purpose**: List all project dependencies to ensure consistent environments across different setups.
+
+### Additional Notes
+
+- **Initialization Files (`__init__.py`)**: These files make directories recognizable as Python packages, enabling module imports within the project.
+  
+- **Modularity and Scalability**:
+  - By segregating functionalities into dedicated directories (`models`, `trainer`, `data`, etc.), the project remains organized and scalable.
+  - Developers can focus on creating or modifying specific components (e.g., adding a new model in `models/`) without affecting unrelated parts of the codebase.
+
+- **Balanced Structure**:
+  - The structure avoids excessive fragmentation by grouping related functionalities within their respective directories.
+  - Ensures that each directory contains a manageable number of files, promoting ease of navigation and maintenance.
+
+- **Extensibility**:
+  - Future enhancements, such as adding new models, trainers, or data processing scripts, can be seamlessly integrated into the existing structure.
+  - Encourages the addition of new modules following the established conventions to maintain consistency.
+
+By adhering to this folder structure, your project will benefit from enhanced organization, making it easier for developers to collaborate, maintain, and scale the codebase effectively.

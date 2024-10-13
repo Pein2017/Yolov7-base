@@ -5,7 +5,7 @@ import pytorch_lightning as pl
 import torch
 import torchmetrics
 
-from .utils import Args
+from utils import Args  # Updated import
 
 
 class Phase(Enum):
@@ -119,8 +119,6 @@ class LtnBaseModule(pl.LightningModule):
             phase (Phase): One of Phase.train, Phase.val, or Phase.test.
         """
         avg_loss = self.loss_metrics[phase].compute()
-        # Remove the following line to prevent logging 'train_loss' and 'val_loss'
-        # self.log(f"{phase.name}_loss", avg_loss, prog_bar=True, logger=True)
         self.log(f"{phase.name}/loss", avg_loss, prog_bar=True, logger=True)
         self.loss_metrics[phase].reset()
 
