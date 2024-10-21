@@ -4,18 +4,24 @@
 # def setup_trainer_instance(...):
 #     pass
 
+import os
+
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from utils import Args
 
-def setup_trainer_instance(args: Args, trial_number: int, study_name: str, exp_setting: str):
+
+def setup_trainer_instance(args: Args, study_name: str, exp_setting: str):
     """Set up and return a PyTorch Lightning Trainer instance."""
+    log_dir = os.path.join(args.ltn_log_dir, study_name, "trial_logs", exp_setting)
+    os.makedirs(log_dir, exist_ok=True)
+
     ltn_logger = TensorBoardLogger(
-        save_dir=args.ltn_log_dir,
-        name=f"{study_name}_{trial_number}",
-        version=exp_setting,
+        save_dir=log_dir,
+        name=None,
+        version="",
     )
 
     early_stop_callback = EarlyStopping(
@@ -33,6 +39,7 @@ def setup_trainer_instance(args: Args, trial_number: int, study_name: str, exp_s
         num_sanity_val_steps=0,
         gradient_clip_val=args.gradient_clip_val,
         callbacks=[early_stop_callback],
+        enable_checkpointing=args.enable_checkpointing,
     )
 
     return trainer

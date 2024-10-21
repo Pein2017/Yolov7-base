@@ -1,61 +1,31 @@
 # scripts/train_optuna.py
 
 import argparse
+import logging
+import os
+import sys
+from multiprocessing import Process, Queue
+
+# Add the project root to sys.path to allow imports from other packages
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from pytorch_lightning import seed_everything
 
 from optim.multi_gpu_optuna import run_multi_gpu_optuna
 from utils.config import Args
-from utils.logging import setup_global_logger
+from utils.helpers import remove_directory_contents
+from utils.logging import log_listener, worker_logging_configurer
 
 
 def initialize_args() -> Args:
     """
-    Initialize and return the Args object with fixed parameters.
+    Initialize and return the Args object by loading configuration from a YAML file.
 
     Returns:
-        Args: Configuration object containing fixed parameters.
+        Args: Configuration object populated from YAML.
     """
-    return Args(
-        # Data-related parameters
-        pos_dir="/data/training_code/yolov7/runs/detect/v7-e6e-p6-bs96-ep1000-lr_1e-3/pos/labels",
-        neg_dir="/data/training_code/yolov7/runs/detect/v7-e6e-p6-bs96-ep1000-lr_1e-3/neg/labels",
-        classes_file="/data/dataset/bbu_training_data/bbu_and_shield/classes.txt",
-        balance_ratio=1.0,
-        resample_method="both",  # Fixed to 'both'. 'downsample' for debugging
-        # Training parameters
-        num_epochs=40,
-        valid_epoch=20,
-        log_after_epoch=15,
-        batch_size=4096,
-        lr=1e-3,  # Initial learning rate; overridden by Optuna
-        optimizer="Adam",  # Fixed to Adam
-        gradient_clip_val=0.1,
-        scheduler_type="onecycle",
-        # Model architecture parameters
-        num_layers=1,  # Fixed to 1
-        attn_heads=2,
-        dropout=0.1,
-        embedding_dim=16,
-        fc_hidden_dims=[32, 16],
-        # Evaluation and optimization parameters
-        selection_criterion="avg_error",  # For threshold optimization
-        early_stop_metric="val/loss",  # For early stopping
-        patience=10,
-        mode="min",
-        # Hardware and environment parameters
-        device_id=0,
-        seed=17,
-        # Logging and storage parameters
-        ltn_log_dir="./ltn_logs",
-        mysql_url="mysql://root:@localhost:3306/optuna_db",
-        # Optuna-specific parameters
-        delete_existing_study=True,  # Control study deletion
-        n_trials=500,  # Number of Optuna trials
-        study_name="24-10-10_with_tpe",  # Name of the Optuna study
-        sampler="tpe",  # Options: "tpe", "random", "cmaes", "nsgaii", "qmc"
-        pruner="median",  # Options: "median", "nop", "hyperband", "threshold"
-    )
+    config_path = "./configs/bbu_config.yaml"
+    return Args.from_yaml(config_path)
 
 
 def main():
@@ -74,19 +44,40 @@ def main():
     # Set a global seed for reproducibility
     seed_everything(args.seed, workers=True)
 
+    # Create a multiprocessing Queue for logging
+    log_queue = Queue()
+
     # Set up global logger
-    setup_global_logger(
-        name="train_optuna",
-        log_file=args.ltn_log_dir + "/train_optuna.log",
-        level="info",
-    )
+    global_log_dir = os.path.join(args.ltn_log_dir, args.study_name)
+    if args.delete_existing_study_folder and os.path.exists(global_log_dir):
+        print(f"Attempting to remove existing study folder: {global_log_dir}")
+        if remove_directory_contents(global_log_dir):
+            print(f"Successfully removed contents of {global_log_dir}")
+        else:
+            print(
+                f"Failed to remove contents of {global_log_dir}. Proceeding with existing directory."
+            )
+
+    os.makedirs(global_log_dir, exist_ok=True)
+    global_log_file = os.path.join(global_log_dir, f"{args.study_name}.log")
+
+    # Start the logging listener process
+    listener = Process(target=log_listener, args=(log_queue, global_log_file))
+    listener.start()
+
+    # Configure worker processes to use the queue
+    worker_logging_configurer(log_queue)
 
     try:
         # Run multi-GPU Optuna hyperparameter optimization
-        run_multi_gpu_optuna(args, cmd_args.n_gpus, cmd_args.n_procs_per_gpu)
+        run_multi_gpu_optuna(args, cmd_args.n_gpus, cmd_args.n_procs_per_gpu, log_queue)
+    except Exception as e:
+        logging.error(f"An error occurred during optimization: {str(e)}")
     finally:
-        # If you have any cleanup, handle it here
-        pass
+        # Signal the logging process to finish and wait for it
+        log_queue.put(None)
+        listener.join()
+        sys.exit(0)
 
 
 if __name__ == "__main__":

@@ -1,98 +1,120 @@
-import logging
+import logging  # Ensure logging is imported
+from typing import Any, Dict
 
-from optuna.study import Study
+from optuna.study import Study, StudyDirection
 from optuna.trial import FrozenTrial, TrialState
-
-
-def log_new_best(
-    logger_name: str,
-    metric_type: str,
-    metric_value: float,
-    epoch: int,
-    fp_over: float,
-    fn_over: float,
-    selection_criterion: str,
-):
-    """
-    Log when a new best metric is found.
-
-    Args:
-        logger_name (str): Name of the logger.
-        metric_type (str): Type of metric ('val' or 'val_cheat').
-        metric_value (float): Value of the metric.
-        epoch (int): Epoch number.
-        fp_over (float): False positive rate.
-        fn_over (float): False negative rate.
-        selection_criterion (str): The criterion used for selection.
-    """
-    logger = logging.getLogger(logger_name)
-    logger.info(
-        f"New best {metric_type} {selection_criterion} = {metric_value:.4f} at epoch {epoch}. "
-        f"FP Over: {fp_over:.4f}, FN Over: {fn_over:.4f}"
-    )
 
 
 class OptunaExperimentLogger:
     """
-    Callback class to log when new best val or val_cheat metrics are found after a specified epoch.
+    Callback class to log when new best metrics are found across all trials.
     """
 
-    def __init__(self, min_improvement: float = 0.001, start_logging_epoch: int = 10):
-        self.best_val = float("inf")
-        self.best_val_cheat = float("inf")
-        self.min_improvement = min_improvement
-        self.start_logging_epoch = start_logging_epoch
+    def __init__(
+        self,
+        process_id: int,
+        shared_best_metrics: Dict[str, float],
+        lock: Any,
+        study_name: str,
+    ):
+        # Initialize with shared best metrics and lock
+        self.shared_best_metrics = shared_best_metrics
+        self.lock = lock
+        self.process_id = process_id
+        self.study_name = study_name  # Add study_name
+        self.logger = logging.getLogger("global_logger")  # Use the standard logger
 
     def __call__(self, study: Study, trial: FrozenTrial) -> None:
-        logger = logging.getLogger("train_optuna")
-        if trial.state != TrialState.COMPLETE:
-            return  # Skip incomplete trials
-
-        best_epoch = trial.user_attrs.get("best_epoch")
-        if best_epoch is None:
-            logger.warning(f"Trial {trial.number} has no 'best_epoch' attribute.")
+        if trial.state != TrialState.COMPLETE or self.process_id != 0:
             return
 
-        selection_criterion = trial.user_attrs.get(
-            "selection_criterion"
-        ) or study.best_trial.params.get("selection_criterion", "avg_error")
-        val_metric = trial.user_attrs.get(selection_criterion)
-        val_cheat_metric = trial.user_attrs.get(f"val_cheat_{selection_criterion}")
+        current_val_metric = trial.user_attrs.get("best_val_value")
+        current_val_cheat_metric = trial.user_attrs.get("best_val_cheat_value")
 
-        # Ensure logging only after the specified log_after_epoch
-        if best_epoch < self.start_logging_epoch:
-            return  # Skip logging before start_logging_epoch
+        if current_val_metric is None or current_val_cheat_metric is None:
+            self.logger.error(
+                f"Trial {trial.number}: Required metrics not found in trial user attributes."
+            )
+            return
 
-        # Log val metric if improved
-        if val_metric is not None and val_metric < self.best_val:
-            self.best_val = val_metric
-            fp_over_tp_fp_val = trial.user_attrs.get("fp_over_tp_fp", 0.0)
-            fn_over_fn_tn_val = trial.user_attrs.get("fn_over_fn_tn", 0.0)
-            log_new_best(
-                logger_name="train_optuna",
-                metric_type="val",
-                metric_value=val_metric,
-                epoch=best_epoch,
-                fp_over=fp_over_tp_fp_val,
-                fn_over=fn_over_fn_tn_val,
-                selection_criterion=selection_criterion,
-            )
+        if_valid = trial.user_attrs.get("if_valid") == "True"
 
-        # Log val_cheat metric if improved
-        if val_cheat_metric is not None and val_cheat_metric < self.best_val_cheat:
-            self.best_val_cheat = val_cheat_metric
-            fp_over_tp_fp_val_cheat = trial.user_attrs.get(
-                "val_cheat_fp_over_tp_fp", 0.0
+        if not if_valid:
+            return  # Skip invalid trials
+
+        log_message_lines = []
+
+        with self.lock:
+            # Check and update best_val_metric
+            if self._is_better(
+                current_val_metric, self.shared_best_metrics["val"], study.direction
+            ):
+                self.shared_best_metrics["val"] = current_val_metric
+                self.shared_best_metrics["val_epoch"] = trial.user_attrs.get(
+                    "best_val_epoch", "N/A"
+                )
+                log_message_lines.append(
+                    f"val: Metric={current_val_metric:.4f}, Epoch={self.shared_best_metrics['val_epoch']}"
+                )
+
+            # Check and update best_val_cheat_metric
+            if self._is_better(
+                current_val_cheat_metric,
+                self.shared_best_metrics["val_cheat"],
+                study.direction,
+            ):
+                self.shared_best_metrics["val_cheat"] = current_val_cheat_metric
+                self.shared_best_metrics["val_cheat_epoch"] = trial.user_attrs.get(
+                    "best_val_cheat_epoch", "N/A"
+                )
+                log_message_lines.append(
+                    f"val_cheat: Metric={current_val_cheat_metric:.4f}, Epoch={self.shared_best_metrics['val_cheat_epoch']}"
+                )
+
+        if log_message_lines:
+            duration = trial.datetime_complete - trial.datetime_start
+            duration_str = f"{int(duration.total_seconds() // 60)}m:{int(duration.total_seconds() % 60)}s"
+            message = (
+                f"Trial {trial.number}: New Best Metrics:\n"
+                + "\n".join(log_message_lines)
+                + f"\nDuration: {duration_str}"
             )
-            fn_over_fn_tn_val_cheat = trial.user_attrs.get(
-                "val_cheat_fn_over_fn_tn", 0.0
+            self.logger.info(message)
+
+    def _get_selection_criterion(self, trial: FrozenTrial, study: Study) -> str:
+        selection_criterion = trial.user_attrs.get("selection_criterion")
+        if selection_criterion is None:
+            selection_criterion = study.user_attrs.get("selection_criterion")
+        if selection_criterion is None:
+            raise ValueError(
+                "selection_criterion not found in trial user_attrs or study user_attrs"
             )
-            log_new_best(
-                logger_name="train_optuna",
-                metric_type="val_cheat",
-                metric_value=val_cheat_metric,
-                epoch=best_epoch,
-                fp_over=fp_over_tp_fp_val_cheat,
-                fn_over=fn_over_fn_tn_val_cheat,
-                selection_criterion=selection_criterion,
-            )
+        return selection_criterion
+
+    def _is_better(
+        self, current: float, best: float, direction: StudyDirection
+    ) -> bool:
+        if direction == StudyDirection.MINIMIZE:
+            return current < best
+        elif direction == StudyDirection.MAXIMIZE:
+            return current > best
+        else:
+            raise ValueError(f"Invalid direction: {direction}")
+
+    def get_best_metrics(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Returns the best metrics tracked by the logger.
+
+        Returns:
+            Dict[str, Dict[str, Any]]: A dictionary containing best metrics and their epochs.
+        """
+        return {
+            "val": {
+                "best_score": self.shared_best_metrics["val"],
+                "best_epoch": self.shared_best_metrics["val_epoch"],
+            },
+            "val_cheat": {
+                "best_score": self.shared_best_metrics["val_cheat"],
+                "best_epoch": self.shared_best_metrics["val_cheat_epoch"],
+            },
+        }

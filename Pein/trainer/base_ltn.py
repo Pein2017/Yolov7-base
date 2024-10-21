@@ -12,6 +12,7 @@ class Phase(Enum):
     train = auto()
     val = auto()
     test = auto()
+    val_cheat = auto()  # Added val_cheat phase
 
     @staticmethod
     def from_string(phase_str: str):
@@ -22,9 +23,11 @@ class Phase(Enum):
             return Phase.val
         elif phase_str == "test":
             return Phase.test
+        elif phase_str == "val_cheat":
+            return Phase.val_cheat
         else:
             raise ValueError(
-                f"Invalid phase: {phase_str}. Choose from 'train', 'val', 'test'."
+                f"Invalid phase: {phase_str}. Choose from 'train', 'val', 'val_cheat', or 'test'."
             )
 
 
@@ -69,10 +72,7 @@ class LtnBaseModule(pl.LightningModule):
 
         Args:
             batch (tuple): Batch of data.
-            phase (Phase): One of Phase.train, Phase.validation, or Phase.test.
-
-        Returns:
-            torch.Tensor: Computed loss.
+            phase (Phase): One of Phase.train, Phase.val, or Phase.test.
         """
         *inputs, labels = batch
         inputs = [input.to(self.device) for input in inputs]

@@ -1,11 +1,12 @@
 # Instead, get the global logger
-import logging
+import logging  # noqa
 import os
 import random
 import sys
 from collections import OrderedDict
 from functools import partial
 
+import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -13,11 +14,16 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 # Append the parent directory to the system path
 sys.path.append(parent_dir)
+from utils.logging import setup_logger  # noqa
 
-
-from utils.setup import setup_logger  # noqa
-
-logger = logging.getLogger("train_optuna")
+# logger = logging.getLogger("train_optuna")  # for training
+logger = setup_logger(
+    log_file="data_debug.log",
+    name="data",
+    level="DEBUG",
+    log_to_console=True,
+    overwrite=True,
+)  # for debug and test
 
 
 class GroupedDetectionDataset(Dataset):
@@ -33,6 +39,7 @@ class GroupedDetectionDataset(Dataset):
         pos_dir,
         neg_dir,
         classes_file,
+        csv_file,  # Add csv_file parameter
         transform=None,
         balance_ratio=None,
         resample_method="downsample",
@@ -43,7 +50,7 @@ class GroupedDetectionDataset(Dataset):
         self.neg_dir = neg_dir
         self.transform = transform
 
-        # Load class names and set number of classes
+        # Ensure class_names is properly set
         self.class_names = self._load_classes(classes_file)
         self.num_classes = len(self.class_names)
 
@@ -82,6 +89,10 @@ class GroupedDetectionDataset(Dataset):
         # Define per-object features and their computation functions
         self.object_feature_functions = OrderedDict(
             [
+                (
+                    "coarse_label",
+                    lambda obj_data: 0 if int(obj_data[0]) in [0, 1, 3] else 1,
+                ),  # 0 for 'bbu', 1 for 'shield'
                 ("class_label", lambda obj_data: int(obj_data[0])),
                 ("x", lambda obj_data: obj_data[1]),
                 ("y", lambda obj_data: obj_data[2]),
@@ -101,6 +112,30 @@ class GroupedDetectionDataset(Dataset):
             + (self.num_classes + 1)  # Figure-wise features length
             + (self.num_classes + 1)  # Group-wise features length
         )
+
+        # Load CSV data for figure features
+        self.figure_features = pd.read_csv(csv_file)
+        self.figure_features["id"] = (
+            self.figure_features["id"].astype(str).str.strip().str.lower()
+        )
+
+        logger.debug(f"Total rows loaded from CSV: {len(self.figure_features)}")
+
+        # Check for duplicate IDs
+        duplicate_ids = self.figure_features[self.figure_features["id"].duplicated()][
+            "id"
+        ].unique()
+        if len(duplicate_ids) > 0:
+            logger.warning(f"Duplicate IDs found in CSV: {duplicate_ids.tolist()}")
+
+        # Check for IDs with unusual formats
+        unusual_ids = [
+            idx
+            for idx in self.figure_features["id"]
+            if not idx.replace("-", "").isdigit()
+        ]
+        if unusual_ids:
+            logger.warning(f"IDs with unusual format found: {unusual_ids[:10]}...")
 
     def _load_classes(self, classes_file):
         """Load class names from a file."""
@@ -259,84 +294,150 @@ class GroupedDetectionDataset(Dataset):
         label = sample["label"]
 
         # Lists to hold features
-        object_feature = []
-        figure_feature = []
+        object_features = []
+        figure_features = []
 
         # Initialize group-level variables
+        total_coarse_counts = [0.0, 0.0]  # [total_bbu_count, total_shield_count]
         total_class_counts = [0.0] * self.num_classes
         total_num_figures = len(files)
 
+        logger.debug(f"Processing sample {idx} with {total_num_figures} figures")
+
         for i, file_path in enumerate(files):
-            # Process each figure and get its entries
-            obj_entries, fig_class_counts = self._process_figure(file_path)
+            # Process each figure and get its entries along with integrated figure feature
+            obj_entries, fig_feature = self._process_figure(file_path)
 
             # Append object entries
-            object_feature.extend(obj_entries)
+            object_features.extend(obj_entries)
 
-            # Append SEP_LABEL between figures (except after the last figure)
-            if i < len(files) - 1:
-                object_feature.append(self._get_sep_object_entry())
-
-            # Append figure entry
-            figure_feature.append(fig_class_counts)
+            # Append figure feature
+            figure_features.append(fig_feature)
 
             # Append SEP_LABEL between figure entries (except after the last figure)
             if i < len(files) - 1:
-                figure_feature.append(self._get_sep_figure_entry())
+                sep_entry = self._get_sep_figure_entry()
+                figure_features.append(sep_entry)
 
-            # Accumulate total class counts
+            # Validate fig_feature length
+            expected_length = (
+                2 + self.num_classes + 2
+            )  # coarse_count + class_count + width + height
+            if len(fig_feature) != expected_length:
+                raise ValueError(
+                    f"fig_feature length ({len(fig_feature)}) does not match expected length ({expected_length})"
+                )
+
+            # Accumulate total coarse counts and class counts
+            total_coarse_counts = [
+                x + y for x, y in zip(total_coarse_counts, fig_feature[:2])
+            ]
             total_class_counts = [
-                x + y for x, y in zip(total_class_counts, fig_class_counts)
+                x + y
+                for x, y in zip(
+                    total_class_counts, fig_feature[2 : 2 + self.num_classes]
+                )
             ]
 
-        # Prepare group_feature
-        group_feature = total_class_counts + [float(total_num_figures)]
+            logger.debug(f"After processing figure {i+1}:")
+            logger.debug(f"  fig_feature: {fig_feature}")
+            logger.debug(f"  total_coarse_counts: {total_coarse_counts}")
+            logger.debug(f"  total_class_counts: {total_class_counts}")
 
-        # Convert features to tensors
-        object_feature = torch.tensor(object_feature, dtype=torch.float32)
-        figure_feature = torch.tensor(figure_feature, dtype=torch.float32)
-        group_feature = torch.tensor(group_feature, dtype=torch.float32)
-        label = torch.tensor(label, dtype=torch.float32)
+        # Prepare group_feature
+        group_feature = (
+            total_coarse_counts + total_class_counts + [float(total_num_figures)]
+        )
+
+        # Assert the correct length of group_feature
+        assert len(group_feature) == 2 + self.num_classes + 1, (
+            f"group_feature length ({len(group_feature)}) does not match "
+            f"expected length ({2 + self.num_classes + 1})"
+        )
+
+        logger.debug(f"Final group_feature: {group_feature}")
 
         # Calculate lengths
-        object_length = object_feature.size(0)
-        figure_length = figure_feature.size(0)
+        object_length = len(object_features)
+        figure_length = len(figure_features)
 
-        return (
-            object_feature,
-            figure_feature,
+        return [
+            object_features,
+            figure_features,
             group_feature,
             object_length,
             figure_length,
             label,
-        )
+        ]
 
     def _process_figure(self, file_path):
         obj_entries = []
 
-        # Initialize class_counts for this figure
-        class_counts = [0.0] * self.num_classes
+        # Initialize class_counts and coarse_counts for this figure
+        fig_count = [0.0] * self.num_classes
+        coarse_count = [0.0, 0.0]  # [bbu_count, shield_count]
+
+        # Extract the unique_id from the file_path
+        unique_id = os.path.splitext(os.path.basename(file_path))[0].strip().lower()
+
+        logger.debug(f"Processing unique_id: '{unique_id}'")
+
+        # Retrieve width and height from the CSV using the unique_id
+        matching_row = self.figure_features[self.figure_features["id"] == unique_id]
+        if matching_row.empty:
+            logger.error(f"ID '{unique_id}' not found in the CSV file.")
+            raise KeyError(f"Image ID '{unique_id}' not found in fig_size_path CSV.")
+
+        fig_size = matching_row[["width", "height"]].astype(float).values[0].tolist()
 
         with open(file_path, "r") as f:
             lines = f.readlines()
 
         for line in lines:
             object_data = list(map(float, line.strip().split()))
-            class_label = int(object_data[0])
 
-            # Compute per-object features (including class_label)
+            # Compute per-object features (including coarse_label and class_label)
             features = [
                 func(object_data) for func in self.object_feature_functions.values()
             ]
 
-            # Update weighted class counts
+            class_label = int(object_data[0])
+            coarse_label = 0 if class_label in [0, 1, 3] else 1
+            confidence = object_data[5]
+
+            # Update weighted class counts and coarse counts
             if 0 <= class_label < self.num_classes:
-                confidence = object_data[5]
-                class_counts[class_label] += confidence
+                fig_count[class_label] += confidence
+                coarse_count[coarse_label] += confidence
 
             obj_entries.append(features)
 
-        return obj_entries, class_counts
+        assert (
+            len(coarse_count) == 2
+        ), f"Expected 2 coarse counts, got {len(coarse_count)}"
+        assert (
+            len(fig_count) == self.num_classes
+        ), f"Expected {self.num_classes} class counts, got {len(fig_count)}"
+        assert len(fig_size) == 2, f"Expected 2 size values, got {len(fig_size)}"
+
+        # Flatten the fig_feature
+        fig_feature = coarse_count + fig_count + fig_size
+
+        expected_length = (
+            2 + self.num_classes + 2
+        )  # coarse_count + class_count + width + height
+        if len(fig_feature) != expected_length:
+            raise ValueError(
+                f"fig_feature length ({len(fig_feature)}) does not match expected length ({expected_length})"
+            )
+
+        logger.debug("_process_figure output:")
+        logger.debug(f"coarse_count: {coarse_count}")
+        logger.debug(f"fig_count: {fig_count}")
+        logger.debug(f"fig_size: {fig_size}")
+        logger.debug(f"fig_feature: {fig_feature}")
+
+        return obj_entries, fig_feature
 
     def _get_sep_object_entry(self):
         # Create a separator entry for object_feature
@@ -346,9 +447,9 @@ class GroupedDetectionDataset(Dataset):
 
     def _get_sep_figure_entry(self):
         # Create a separator entry for figure_feature
-        # The length should match the number of classes
-        sep_entry = [self.SEP_LABEL] + [0.0] * (self.num_classes - 1)
-        return sep_entry
+        return [self.SEP_LABEL] + [0.0] * (
+            2 + self.num_classes + 2 - 1
+        )  # coarse_counts + class_counts + fig_size - 1 for SEP_LABEL
 
     def _get_separator_entry(self):
         # For per-object features, use default values
@@ -358,29 +459,17 @@ class GroupedDetectionDataset(Dataset):
         class_label = self.SEP_LABEL
 
         # Figure-wise features: zeros
-        figure_features = [0.0] * (self.num_classes + 1)
+        figure_features = [0.0] * (
+            2 + self.num_classes + 2
+        )  # coarse_counts + class_counts + fig_size
 
         # Group-wise features: zeros
-        group_features = [0.0] * (self.num_classes + 1)
+        group_features = [0.0] * (
+            2 + self.num_classes + 1
+        )  # coarse_counts + class_counts + total_figures
 
         entry = [class_label] + features + figure_features + group_features
         return entry
-
-    def _get_default_value(self, feature_name, entry_type="object"):
-        """Provide default values for features based on entry type."""
-        if feature_name == "class_label":
-            if entry_type == "figure":
-                return self.CLASS_COUNTS_LABEL
-            elif entry_type == "separator":
-                return self.SEP_LABEL
-            elif entry_type == "group":
-                return self.TOTAL_CLASS_COUNTS_LABEL
-            elif entry_type == "padding":
-                return self.PAD_LABEL
-            else:
-                return 0.0  # For object entries
-        else:
-            return 0.0  # Default for other features
 
 
 def custom_collate_fn(batch, padding_label):
@@ -395,6 +484,8 @@ def custom_collate_fn(batch, padding_label):
         tuple: (object_features_padded, figure_features_padded, group_features_tensor, object_lengths, figure_lengths, labels_tensor)
     """
     # Unpack each component from the batch
+    batch_data = list(zip(*batch))
+
     (
         object_features,
         figure_features,
@@ -402,53 +493,74 @@ def custom_collate_fn(batch, padding_label):
         object_lengths,
         figure_lengths,
         labels,
-    ) = zip(*batch)
+    ) = batch_data
 
     # Convert lengths to integer tensors
     object_lengths = torch.tensor(object_lengths, dtype=torch.long)
     figure_lengths = torch.tensor(figure_lengths, dtype=torch.long)
 
+    # Debug log
+    logger.debug("In custom_collate_fn:")
+    logger.debug(f"object_features[0] length: {len(object_features[0])}")
+    logger.debug(f"figure_features[0] length: {len(figure_features[0])}")
+    logger.debug(f"group_features[0] length: {len(group_features[0])}")
+
     # Pad object_features
-    max_object_length = object_lengths.max().item()
-    object_feature_dim = object_features[0].size(1)
+    max_object_length = max(len(of) for of in object_features)
+    object_feature_dim = len(object_features[0][0])
     pad_entry_obj = [padding_label] + [0.0] * (object_feature_dim - 1)
-    pad_entry_obj = torch.tensor(pad_entry_obj, dtype=torch.float32)
 
     object_features_padded = []
     for of in object_features:
-        pad_length = max_object_length - of.size(0)
+        pad_length = max_object_length - len(of)
         if pad_length > 0:
-            # Ensure pad_length is an integer
-            padding = pad_entry_obj.unsqueeze(0).repeat(pad_length, 1)
-            padded_of = torch.cat([of, padding], dim=0)
+            padding = [pad_entry_obj] * pad_length
+            padded_of = of + padding
         else:
             padded_of = of
         object_features_padded.append(padded_of)
-    object_features_padded = torch.stack(object_features_padded)
+    object_features_padded = torch.tensor(object_features_padded, dtype=torch.float32)
 
     # Pad figure_features
-    max_figure_length = figure_lengths.max().item()
-    figure_feature_dim = figure_features[0].size(1)
-    pad_entry_fig = [padding_label] + [0.0] * (figure_feature_dim - 1)
-    pad_entry_fig = torch.tensor(pad_entry_fig, dtype=torch.float32)
+    max_figure_length = max(len(ff) for ff in figure_features)
+    fig_feature_dim = len(figure_features[0][0]) if figure_features[0] else 0
+    pad_entry_fig = [padding_label] + [0.0] * (fig_feature_dim - 1)
 
     figure_features_padded = []
     for ff in figure_features:
-        pad_length = max_figure_length - ff.size(0)
+        pad_length = max_figure_length - len(ff)
         if pad_length > 0:
-            # Ensure pad_length is an integer
-            padding = pad_entry_fig.unsqueeze(0).repeat(pad_length, 1)
-            padded_ff = torch.cat([ff, padding], dim=0)
+            padding = [pad_entry_fig] * pad_length
+            padded_ff = ff + padding
         else:
             padded_ff = ff
+
+        # Ensure all entries have the same length
+        if len(padded_ff) > 0 and len(padded_ff[0]) != fig_feature_dim:
+            logger.error(
+                f"Mismatch in figure feature dimension: expected {fig_feature_dim}, got {len(padded_ff[0])}"
+            )
+            padded_ff = [entry[:fig_feature_dim] for entry in padded_ff]
+
         figure_features_padded.append(padded_ff)
-    figure_features_padded = torch.stack(figure_features_padded)
+
+    # Convert to tensor after padding
+    figure_features_padded = torch.tensor(figure_features_padded, dtype=torch.float32)
 
     # Stack group_features
-    group_features_tensor = torch.stack(group_features)
+    group_features_tensor = torch.tensor(group_features, dtype=torch.float32)
+
+    logger.debug("In custom_collate_fn:")
+    logger.debug(f"group_features: {group_features}")
+    logger.debug(f"group_features_tensor shape: {group_features_tensor.shape}")
 
     # Convert labels to tensors
     labels_tensor = torch.tensor(labels, dtype=torch.float32)
+
+    # Debug logging for figure features
+    logger.debug("Figure features before padding:")
+    for i, ff in enumerate(figure_features):
+        logger.debug(f"Sample {i}: shape = {len(ff)}, {len(ff[0]) if ff else 0}")
 
     return (
         object_features_padded,
@@ -464,6 +576,7 @@ def get_dataloader(
     pos_dir,
     neg_dir,
     classes_file,
+    csv_file,  # Added parameter for fig_size_path
     split=[0.8, 0.2],
     batch_size=32,
     balance_ratio: int = None,
@@ -476,8 +589,13 @@ def get_dataloader(
         3,
     ], "Split should be either [train, val] or [train, val, test]."
 
-    # Create the full dataset without resampling
-    full_dataset = GroupedDetectionDataset(pos_dir, neg_dir, classes_file)
+    # Create the full dataset with fig_size_path
+    full_dataset = GroupedDetectionDataset(
+        pos_dir,
+        neg_dir,
+        classes_file,
+        csv_file,  # Pass csv_file
+    )
 
     PAD_LABEL = full_dataset.PAD_LABEL  # Assuming PAD_LABEL is num_classes + 2
 
@@ -498,6 +616,7 @@ def get_dataloader(
         pos_dir,
         neg_dir,
         classes_file,
+        csv_file,  # Pass csv_file
         balance_ratio=balance_ratio,
         resample_method=resample_method,
         indices=train_indices,
@@ -508,6 +627,7 @@ def get_dataloader(
         pos_dir,
         neg_dir,
         classes_file,
+        csv_file,  # Pass csv_file
         balance_ratio=balance_ratio,
         resample_method=resample_method,
         indices=val_indices,
@@ -552,21 +672,49 @@ def get_dataloader(
     return dataloaders
 
 
-def print_class_counts(class_counts, class_names, is_group=False):
+def print_class_counts(feature, class_names, is_figure=False, is_group=False):
     """Helper function to print class counts with class names."""
+    if isinstance(feature, torch.Tensor):
+        feature = feature.tolist()
+
     if is_group:
-        for cls_idx, count in enumerate(
-            class_counts[:-1]
-        ):  # Exclude the last element (num_figures)
-            cls_name = class_names[cls_idx]
-            logger.info(f"  {cls_name}: {count}")
-        logger.info(
-            f"  Total Number of Figures: {class_counts[-1]}"
-        )  # Last element is num_figures
+        # For group features, we expect 2 + num_classes + 1 elements
+        expected_length = len(class_names) + 3
+        if len(feature) != expected_length:
+            raise ValueError(
+                f"group_feature length ({len(feature)}) does not match "
+                f"expected length ({expected_length})"
+            )
+        coarse_count = feature[:2]
+        class_count = feature[2:-1]  # All but the last element are class counts
+        total_num_figures = feature[-1]  # Last element is total number of figures
+    elif is_figure:
+        # For figure features, we expect 2 + num_classes + 2 elements (including figure size)
+        expected_length = len(class_names) + 4
+        if len(feature) != expected_length:
+            raise ValueError(
+                f"figure_feature length ({len(feature)}) does not match "
+                f"expected length ({expected_length})"
+            )
+        coarse_count = feature[:2]
+        class_count = feature[2:-2]  # All but the last two elements are class counts
+        fig_size = feature[-2:]  # Last two elements are figure size
     else:
-        for cls_idx, count in enumerate(class_counts):
-            cls_name = class_names[cls_idx]
-            logger.info(f"  {cls_name}: {count}")
+        raise ValueError("Must specify either is_figure=True or is_group=True")
+
+    logger.debug("Coarse-grained Counts:")
+    logger.debug(f"  BBU: {coarse_count[0]:.4f}")
+    logger.debug(f"  Shield: {coarse_count[1]:.4f}")
+
+    logger.debug("Class Counts:")
+    for cls_idx, count in enumerate(class_count):
+        cls_name = class_names[cls_idx]
+        logger.debug(f"  {cls_name}: {count:.4f}")
+
+    if is_group:
+        logger.debug(f"Total Number of Figures: {total_num_figures:.0f}")
+    elif is_figure:
+        logger.debug(f"Figure Size: {fig_size[0]:.0f} x {fig_size[1]:.0f}")
 
 
 def main():
@@ -574,6 +722,7 @@ def main():
     pos_dir = "/data/training_code/yolov7/runs/detect/v7-p5-lr_1e-3/pos/labels"
     neg_dir = "/data/training_code/yolov7/runs/detect/v7-p5-lr_1e-3/neg/labels"
     classes_file = "/data/dataset/bbu_training_data/bbu_and_shield/classes.txt"
+    fig_size_path = "/data/training_code/yolov7/Pein/fig_size.csv"
 
     # Desired balance ratio and resampling method
     balance_ratio = 1.0  # Desired positive to negative ratio (1:1)
@@ -584,6 +733,7 @@ def main():
         pos_dir=pos_dir,
         neg_dir=neg_dir,
         classes_file=classes_file,
+        csv_file=fig_size_path,
         split=[0.8, 0.2],
         batch_size=2,  # For clearer logging
         balance_ratio=balance_ratio,
@@ -599,24 +749,28 @@ def main():
     class_names = train_loader.dataset.class_names
 
     # Iterate over the train_loader
-    for batch_idx, (*inputs, labels) in enumerate(train_loader):
+    for batch_idx, batch in enumerate(train_loader):
+        logger.debug(f"\n{'='*50}")
+        logger.debug(f"Batch {batch_idx + 1}")
+        logger.debug(f"{'='*50}")
+
+        # Unpack the batch
         (
             object_features_padded,
             figure_features_padded,
             group_features_tensor,
             object_lengths,
             figure_lengths,
-        ) = inputs
-        labels_tensor = labels
+            labels_tensor,
+        ) = batch
 
-        logger.info(f"\n===== Batch {batch_idx + 1} =====")
+        logger.debug(f"Batch Labels: {labels_tensor.numpy()}")
 
-        # Log batch labels
-        logger.info(f"Batch Labels: {labels_tensor.numpy()}")
-
-        # Iterate over the batch
+        # Iterate over the samples in the batch
         for sample_idx in range(object_features_padded.size(0)):
-            logger.info(f"\n--- Sample {sample_idx + 1} ---")
+            logger.debug(f"\n{'-'*50}")
+            logger.debug(f"Sample {sample_idx + 1}")
+            logger.debug(f"{'-'*50}")
 
             # Get lengths
             obj_length = object_lengths[sample_idx].item()
@@ -627,64 +781,79 @@ def main():
             figure_sequence = figure_features_padded[sample_idx][:fig_length]
             group_feature = group_features_tensor[sample_idx]
 
-            # Initialize variables for tracking figures
-            figure_idx = 1
-            obj_seq_idx = 0
-            fig_seq_idx = 0
+            # Initialize variables to keep track of the current figure
+            current_figure_idx = 1
+            current_figure_objects = []
 
-            logger.info("Object Features:")
-            while obj_seq_idx < obj_length:
-                data = object_sequence[obj_seq_idx].numpy()
-                class_label = int(data[0])
-                other_features = data[1:]
+            # 1. Object-level and Figure-level data
+            logger.debug("\n1. Object-level and Figure-level Data:")
+            logger.debug("=" * 40)
 
-                if class_label == PAD_LABEL:
-                    obj_seq_idx += 1
-                    continue  # Skip padding entries
+            for obj_idx, obj_feature in enumerate(object_sequence):
+                coarse_label = int(obj_feature[0].item())
+                class_label = int(obj_feature[1].item())
 
-                elif class_label == SEP_LABEL:
-                    logger.info(f"----- End of Figure {figure_idx} -----\n")
-                    figure_idx += 1
-                    obj_seq_idx += 1
-                    continue
+                if class_label == SEP_LABEL:
+                    # Log the objects for the current figure
+                    logger.debug(f"\nFigure {current_figure_idx} Objects:")
+                    for i, obj in enumerate(current_figure_objects, 1):
+                        logger.debug(f"  Object {i}:")
+                        for fname, fvalue in obj:
+                            logger.debug(f"    {fname}: {fvalue:.4f}")
 
-                else:
-                    logger.info(f"----- Figure {figure_idx} -----")
-                    # Object entry
-                    logger.info(f"Object at index {obj_seq_idx + 1}:")
-                    logger.info(f"  Class Label: {class_label}")
-                    # Extract and log feature values
+                    # Log the figure-level data
+                    logger.debug(f"\nFigure {current_figure_idx} Summary:")
+                    try:
+                        print_class_counts(
+                            figure_sequence[current_figure_idx - 1].tolist(),
+                            class_names,
+                            is_figure=True,
+                        )
+                    except ValueError as e:
+                        logger.error(f"Error in Figure {current_figure_idx}: {str(e)}")
+
+                    logger.debug("-" * 40)
+
+                    # Reset for the next figure
+                    current_figure_idx += 1
+                    current_figure_objects = []
+
+                elif class_label != PAD_LABEL:
+                    # Add object to the current figure's list
+                    obj_data = []
                     feature_names = list(
                         train_loader.dataset.object_feature_functions.keys()
-                    )[1:]  # Exclude class_label
-                    for fname, fvalue in zip(feature_names, other_features):
-                        logger.info(f"  {fname}: {fvalue}")
-                    obj_seq_idx += 1
+                    )
+                    for fname, fvalue in zip(feature_names, obj_feature):
+                        obj_data.append((fname, fvalue.item()))
+                    current_figure_objects.append(obj_data)
 
-            # Reset figure index for figure features
-            figure_idx = 1
-            fig_seq_idx = 0
+            # Log the last figure if it wasn't followed by a separator
+            if current_figure_objects:
+                logger.debug(f"\nFigure {current_figure_idx} Objects:")
+                for i, obj in enumerate(current_figure_objects, 1):
+                    logger.debug(f"  Object {i}:")
+                    for fname, fvalue in obj:
+                        logger.debug(f"    {fname}: {fvalue:.4f}")
 
-            logger.info("\nFigure Features:")
-            while fig_seq_idx < fig_length:
-                data = figure_sequence[fig_seq_idx].numpy()
-                class_counts = data
+                logger.debug(f"\nFigure {current_figure_idx} Summary:")
+                try:
+                    print_class_counts(
+                        figure_sequence[current_figure_idx - 1].tolist(),
+                        class_names,
+                        is_figure=True,
+                    )
+                except ValueError as e:
+                    logger.error(f"Error in Figure {current_figure_idx}: {str(e)}")
 
-                if (class_counts[0] == SEP_LABEL) and all(class_counts[1:] == 0):
-                    logger.info(f"----- End of Figure {figure_idx} -----\n")
-                    figure_idx += 1
-                    fig_seq_idx += 1
-                    continue
-
-                else:
-                    logger.info(f"Class Counts for Figure {figure_idx}:")
-                    print_class_counts(class_counts, class_names)
-                    fig_seq_idx += 1
-
-            # Log group features
-            logger.info("\nGroup Features:")
-            logger.info("Total Class Counts across all Figures:")
-            print_class_counts(group_feature.numpy(), class_names, is_group=True)
+            # 2. Group-level data
+            logger.debug("\n2. Group-level Data:")
+            logger.debug("=" * 40)
+            try:
+                print_class_counts(group_feature.numpy(), class_names, is_group=True)
+            except ValueError as e:
+                logger.error(f"Error in Group-level data: {str(e)}")
+                logger.error(f"group_feature content: {group_feature.numpy()}")
 
         # Break after the first batch for testing
         break

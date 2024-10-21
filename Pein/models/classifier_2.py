@@ -1,36 +1,60 @@
+import os
+import sys
+
 import torch
 import torch.nn as nn
+
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(parent_dir)
+
+from data.data_factory import get_dataloader  # noqa
+
+# Append the parent directory to the system path
+from utils.logging import setup_logger  # noqa
+
+logger = setup_logger(
+    log_file="model_debug.log",
+    name="model",
+    level="DEBUG",
+    log_to_console=True,
+    overwrite=True,
+)  # for debug and test
 
 
 class DetectionClassificationModel(nn.Module):
     def __init__(
         self,
         num_classes,
-        num_labels,  # Total number of labels including special labels
-        PAD_LABEL,
-        SEP_LABEL,
+        num_labels=None,
+        PAD_LABEL=None,
+        SEP_LABEL=None,
         embedding_dim=16,
         hidden_dim=64,
         attn_heads=4,
-        fc_hidden_dims=[32, 16],
+        fc_hidden_dims=[16, 8],
         num_layers=2,
         dropout=0.1,
+        use_fig_size=False,
     ):
         super(DetectionClassificationModel, self).__init__()
 
-        self.PAD_LABEL = PAD_LABEL
-        self.SEP_LABEL = SEP_LABEL
+        # Set default values if not provided
+        #! Note: Ensure class labels are zero-indexed (0 to num_classes-1)
+        # * SEP_LABEL and PAD_LABEL are assigned values outside this range
         self.num_classes = num_classes
-        self.num_labels = num_labels
+        self.SEP_LABEL = SEP_LABEL if SEP_LABEL is not None else num_classes
+        self.PAD_LABEL = PAD_LABEL if PAD_LABEL is not None else num_classes + 1
+        self.num_labels = num_labels if num_labels is not None else num_classes + 2
+
         self.embedding_dim = embedding_dim
         self.num_numerical_features = 6  # x, y, w, h, conf, area
         self.fc_hidden_dims = fc_hidden_dims
 
         # Embedding layer for class labels
         self.class_embedding = nn.Embedding(
-            num_embeddings=num_labels,
+            num_embeddings=self.num_labels,
             embedding_dim=embedding_dim,
-            padding_idx=PAD_LABEL,
+            padding_idx=self.PAD_LABEL,
         )
 
         # Linear layer to project numerical features
@@ -44,13 +68,13 @@ class DetectionClassificationModel(nn.Module):
         # LayerNorm for object inputs
         self.obj_layer_norm = nn.LayerNorm(embedding_dim * 2)
 
-        # Transformer encoder layers for object features within figures
+        # Object-level Transformer
         encoder_layer_obj = nn.TransformerEncoderLayer(
             d_model=embedding_dim * 2,
             nhead=attn_heads,
             dim_feedforward=hidden_dim,
-            activation="gelu",
             dropout=dropout,
+            activation="gelu",
             batch_first=True,
         )
         self.object_encoder = nn.TransformerEncoder(
@@ -72,13 +96,13 @@ class DetectionClassificationModel(nn.Module):
         # LayerNorm for figure inputs
         self.fig_layer_norm = nn.LayerNorm(embedding_dim)
 
-        # Transformer encoder layers for figure features
+        # Figure-level Transformer
         encoder_layer_fig = nn.TransformerEncoderLayer(
             d_model=embedding_dim,
             nhead=attn_heads,
             dim_feedforward=hidden_dim,
-            activation="gelu",
             dropout=dropout,
+            activation="gelu",
             batch_first=True,
         )
         self.figure_encoder = nn.TransformerEncoder(
@@ -91,24 +115,33 @@ class DetectionClassificationModel(nn.Module):
         self.class_counts_projection = nn.Linear(num_classes, embedding_dim)
 
         # Fully connected layers
+        fc_input_dim = embedding_dim + embedding_dim + num_classes + 1
         fc_layers = []
-        last_hidden_dim = (
-            embedding_dim + embedding_dim + num_classes + 1
-        )  # Object + Figure + Group feature
+        last_hidden_dim = fc_input_dim
 
-        # Adjusted for the example
         for fc_dim in self.fc_hidden_dims:
             fc_layers.append(nn.Linear(last_hidden_dim, fc_dim))
             fc_layers.append(nn.GELU())
             fc_layers.append(nn.Dropout(dropout))
             last_hidden_dim = fc_dim
 
-        # Final output layer
         fc_layers.append(nn.Linear(last_hidden_dim, 1))
         self.fc_layers = nn.Sequential(*fc_layers)
 
         # Initialize weights
         self._init_weights()
+
+        self.use_fig_size = use_fig_size  # Store the flag
+
+        # Adjust figure feature dimension based on use_fig_size
+        fig_feature_dim = num_classes + 2 if use_fig_size else num_classes
+
+        # Linear layer to project figure features
+        self.figure_feature_proj = nn.Linear(fig_feature_dim, embedding_dim)
+
+        logger.debug(
+            f"Initializing DetectionClassificationModel with num_classes={num_classes}, use_fig_size={use_fig_size}"
+        )
 
     def forward(
         self,
@@ -118,6 +151,11 @@ class DetectionClassificationModel(nn.Module):
         object_lengths,
         figure_lengths,
     ):
+        logger.debug(f"Forward pass: batch_size={object_features.size(0)}")
+        logger.debug(f"Object features shape: {object_features.shape}")
+        logger.debug(f"Figure features shape: {figure_features.shape}")
+        logger.debug(f"Group features shape: {group_features.shape}")
+
         batch_size = object_features.size(0)
 
         # Process object features
@@ -149,9 +187,12 @@ class DetectionClassificationModel(nn.Module):
         # Pass through fully connected layers
         logits = self.fc_layers(combined_features).squeeze(1)  # [batch_size]
 
+        logger.debug(f"Model output (logits) shape: {logits.shape}")
+
         return logits
 
     def _process_object_sequence(self, obj_seq):
+        logger.debug(f"Processing object sequence of shape: {obj_seq.shape}")
         class_labels = obj_seq[:, 0].long()
         other_features = obj_seq[:, 1:]  # [seq_length, num_numerical_features]
 
@@ -187,11 +228,11 @@ class DetectionClassificationModel(nn.Module):
         obj_input = self.obj_layer_norm(obj_input)
 
         # Create attention mask
-        attn_mask = ~mask.unsqueeze(0)  # [1, seq_length]
+        attn_mask = ~mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_length]
 
         # Pass through object encoder
         obj_output = self.object_encoder(
-            obj_input.unsqueeze(0), src_key_padding_mask=attn_mask
+            obj_input.unsqueeze(0), src_key_padding_mask=attn_mask.squeeze(0)
         )  # [1, seq_length, embedding_dim * 2]
 
         # Pool over valid entries
@@ -200,13 +241,13 @@ class DetectionClassificationModel(nn.Module):
         # Project back to embedding_dim
         obj_output = self.obj_output_proj(obj_output)  # [embedding_dim]
 
+        logger.debug(f"Object output shape: {obj_output.shape}")
         return obj_output
 
     def _process_figure_sequence(self, fig_seq):
-        class_counts = fig_seq  # [fig_seq_length, fig_feature_dim]
-
-        # Assume that SEP_LABEL is used in class_counts[:, 0] for separators
-        class_labels = class_counts[:, 0].long()
+        logger.debug(f"Processing figure sequence of shape: {fig_seq.shape}")
+        # Assume that SEP_LABEL is used in fig_seq[:, 0] for separators
+        class_labels = fig_seq[:, 0].long()
         pad_mask = class_labels != self.PAD_LABEL
         sep_mask = class_labels != self.SEP_LABEL
         mask = pad_mask & sep_mask  # Valid figure entries
@@ -215,10 +256,31 @@ class DetectionClassificationModel(nn.Module):
             # If all entries are PAD or SEP, return zeros
             return torch.zeros(self.embedding_dim).to(fig_seq.device)
 
+        # Extract class counts and figure size based on use_fig_size flag
+        if self.use_fig_size:
+            class_counts = fig_seq[mask, : self.num_classes]
+            fig_sizes = fig_seq[mask, self.num_classes : self.num_classes + 2]
+        else:
+            class_counts = fig_seq[mask, : self.num_classes]
+
+        logger.debug(f"Class counts shape: {class_counts.shape}")
+        logger.debug(f"Class counts content: {class_counts}")
+
+        # Ensure class_counts is 2D
+        if class_counts.dim() == 1:
+            class_counts = class_counts.unsqueeze(0)
+
         # Project class counts to embeddings
         fig_embeds = self.class_counts_projection(
-            class_counts[mask]
+            class_counts
         )  # [num_figures, embedding_dim]
+        logger.debug(f"Figure embeddings shape after projection: {fig_embeds.shape}")
+
+        # If using figure size, concatenate it with the embeddings
+        if self.use_fig_size:
+            logger.debug(f"Figure sizes shape: {fig_sizes.shape}")
+            fig_embeds = torch.cat([fig_embeds, fig_sizes], dim=-1)
+            fig_embeds = self.figure_feature_proj(fig_embeds)
 
         # Add positional encoding
         fig_input = self.fig_positional_encoding(fig_embeds.unsqueeze(0)).squeeze(
@@ -228,15 +290,15 @@ class DetectionClassificationModel(nn.Module):
         # Apply LayerNorm
         fig_input = self.fig_layer_norm(fig_input)
 
-        # No need for attention mask since we've filtered invalid entries
         # Pass through figure encoder
         fig_output = self.figure_encoder(
-            fig_input.unsqueeze(0)
+            fig_input.unsqueeze(0), src_key_padding_mask=~mask.unsqueeze(0)
         )  # [1, num_figures, embedding_dim]
 
         # Pool over valid entries
-        fig_output = fig_output[0].mean(dim=0)  # [embedding_dim]
+        fig_output = fig_output[0][mask].mean(dim=0)  # [embedding_dim]
 
+        logger.debug(f"Final figure output shape: {fig_output.shape}")
         return fig_output
 
     def _init_weights(self):
@@ -246,6 +308,11 @@ class DetectionClassificationModel(nn.Module):
                 nn.init.xavier_uniform_(param)
             elif "bias" in name:
                 nn.init.zeros_(param)
+
+    def _create_padding_mask(self, lengths, max_len):
+        batch_size = lengths.size(0)
+        mask = torch.arange(max_len).expand(batch_size, max_len) >= lengths.unsqueeze(1)
+        return mask
 
 
 class PositionalEncoding(nn.Module):
@@ -269,159 +336,110 @@ class PositionalEncoding(nn.Module):
 
 
 def main():
-    # Example parameters
-    batch_size = 2
-    num_classes = 5  # Number of classes excluding special labels
-    SEP_LABEL = num_classes + 1  # 6
-    PAD_LABEL = num_classes + 2  # 7
-    num_labels = num_classes + 3  # 8 labels (0 to 7)
+    # Directories and files
+    pos_dir = "/data/training_code/yolov7/runs/detect/v7-p5-lr_1e-3/pos/labels"
+    neg_dir = "/data/training_code/yolov7/runs/detect/v7-p5-lr_1e-3/neg/labels"
+    classes_file = "/data/dataset/bbu_training_data/bbu_and_shield/classes.txt"
+    fig_size_path = "/data/training_code/yolov7/Pein/fig_size.csv"
 
-    embedding_dim = 16
-    hidden_dim = 64
-    num_attention_heads = 4
-    num_layers = 2
+    # Model parameters
+    num_classes = 5  # Adjust this based on your actual number of classes
+    embedding_dim = 4
+    hidden_dim = 6
+    num_attention_heads = 2
+    num_layers = 1
     dropout = 0.1
-
-    # Create random data for two batches
-    batch_data = []
-    labels = []
     batch_size = 2
+    use_fig_size = False
 
-    for _ in range(batch_size):
-        num_figures = torch.randint(
-            1, 4, (1,)
-        ).item()  # Random number of figures between 1 and 3
-        object_feature = []
-        figure_feature = []
-        total_class_counts = torch.zeros(num_classes)
-        total_num_figures = num_figures
-
-        for fig_idx in range(num_figures):
-            # Random number of objects in this figure
-            num_objects = torch.randint(1, 5, (1,)).item()  # Between 1 and 4 objects
-            class_counts = torch.zeros(num_classes)
-
-            for obj_idx in range(num_objects):
-                class_label = torch.randint(0, num_classes, (1,)).item()
-                x = torch.rand(1).item()
-                y = torch.rand(1).item()
-                w = torch.rand(1).item()
-                h = torch.rand(1).item()
-                conf = torch.rand(1).item()
-                area = w * h
-                other_features = [x, y, w, h, conf, area]
-                obj_entry = [class_label] + other_features
-                object_feature.append(obj_entry)
-
-                # Update class counts
-                class_counts[class_label] += conf
-
-            # Append SEP_LABEL to object_feature if not last figure
-            if fig_idx < num_figures - 1:
-                object_feature.append([SEP_LABEL] + [0.0] * 6)
-
-            # Figure feature (class counts)
-            figure_feature.append(class_counts.tolist())
-
-            # Append SEP_LABEL to figure_feature if not last figure
-            if fig_idx < num_figures - 1:
-                figure_feature.append([SEP_LABEL] + [0.0] * (num_classes - 1))
-
-            # Update total class counts
-            total_class_counts += class_counts
-
-        # Group feature
-        group_feature = total_class_counts.tolist() + [float(total_num_figures)]
-
-        # Convert to tensors
-        object_feature = torch.tensor(object_feature, dtype=torch.float32)
-        figure_feature = torch.tensor(figure_feature, dtype=torch.float32)
-        group_feature = torch.tensor(group_feature, dtype=torch.float32)
-
-        # Append to batch_data
-        batch_data.append((object_feature, figure_feature, group_feature))
-
-        # Random label
-        label = torch.randint(0, 2, (1,)).item()
-        labels.append(label)
-
-    # Now pad the sequences to create batch tensors
-    object_features, figure_features, group_features = zip(*[d for d in batch_data])
-    labels = torch.tensor(labels, dtype=torch.long)
-
-    # Pad object_features
-    object_lengths = torch.tensor(
-        [of.size(0) for of in object_features], dtype=torch.long
+    # Get dataloaders
+    dataloaders = get_dataloader(
+        pos_dir=pos_dir,
+        neg_dir=neg_dir,
+        classes_file=classes_file,
+        csv_file=fig_size_path,
+        split=[0.8, 0.2],
+        batch_size=batch_size,
+        balance_ratio=1.0,
+        resample_method="downsample",
     )
-    max_object_length = object_lengths.max()
-    object_feature_dim = object_features[0].size(1)
 
-    pad_entry_obj = [PAD_LABEL] + [0.0] * (object_feature_dim - 1)
-    pad_entry_obj = torch.tensor(pad_entry_obj, dtype=torch.float32)
+    # Access the train_loader
+    train_loader = dataloaders["train"]
 
-    object_features_padded = []
-    for of in object_features:
-        length = of.size(0)
-        pad_length = max_object_length - length
-        if pad_length > 0:
-            padding = pad_entry_obj.unsqueeze(0).repeat(pad_length, 1)
-            padded_of = torch.cat([of, padding], dim=0)
-        else:
-            padded_of = of
-        object_features_padded.append(padded_of)
-    object_features_padded = torch.stack(object_features_padded)
-
-    # Pad figure_features
-    figure_lengths = torch.tensor(
-        [ff.size(0) for ff in figure_features], dtype=torch.long
-    )
-    max_figure_length = figure_lengths.max()
-    figure_feature_dim = figure_features[0].size(1)
-
-    pad_entry_fig = [PAD_LABEL] + [0.0] * (figure_feature_dim - 1)
-    pad_entry_fig = torch.tensor(pad_entry_fig, dtype=torch.float32)
-
-    figure_features_padded = []
-    for ff in figure_features:
-        length = ff.size(0)
-        pad_length = max_figure_length - length
-        if pad_length > 0:
-            padding = pad_entry_fig.unsqueeze(0).repeat(pad_length, 1)
-            padded_ff = torch.cat([ff, padding], dim=0)
-        else:
-            padded_ff = ff
-        figure_features_padded.append(padded_ff)
-    figure_features_padded = torch.stack(figure_features_padded)
-
-    group_features_tensor = torch.stack(group_features)
+    # Get special labels from the dataset
+    PAD_LABEL = train_loader.dataset.PAD_LABEL
+    SEP_LABEL = train_loader.dataset.SEP_LABEL
+    num_labels = train_loader.dataset.num_labels
 
     # Initialize model
     model = DetectionClassificationModel(
         num_classes=num_classes,
-        num_labels=num_labels,
-        PAD_LABEL=PAD_LABEL,
         SEP_LABEL=SEP_LABEL,
+        PAD_LABEL=PAD_LABEL,
+        num_labels=num_labels,
         embedding_dim=embedding_dim,
         hidden_dim=hidden_dim,
         attn_heads=num_attention_heads,
         num_layers=num_layers,
         dropout=dropout,
+        use_fig_size=use_fig_size,
     )
 
-    # Forward pass
-    logits = model(
-        object_features_padded,
-        figure_features_padded,
-        group_features_tensor,
-        object_lengths,
-        figure_lengths,
+    # Set the model to evaluation mode
+    model.eval()
+
+    logger.debug(f"Loaded dataloaders with batch_size={batch_size}")
+    logger.debug(
+        f"PAD_LABEL: {PAD_LABEL}, SEP_LABEL: {SEP_LABEL}, num_labels: {num_labels}"
     )
 
-    # Print outputs
-    print("Model Output (Logits):")
-    print(logits)
-    print("\nPredicted Probabilities:")
-    print(torch.sigmoid(logits))
+    # After model initialization
+    logger.debug(f"Model initialized with use_fig_size={use_fig_size}")
+
+    # Before processing a batch
+    logger.debug("Processing a single batch")
+
+    for batch in train_loader:
+        (
+            object_features_padded,
+            figure_features_padded,
+            group_features_tensor,
+            object_lengths,
+            figure_lengths,
+            labels_tensor,
+        ) = batch
+
+        logger.debug("Batch shapes:")
+        logger.debug(f"  object_features_padded: {object_features_padded.shape}")
+        logger.debug(f"  figure_features_padded: {figure_features_padded.shape}")
+        logger.debug(f"  group_features_tensor: {group_features_tensor.shape}")
+        logger.debug(f"  object_lengths: {object_lengths.shape}")
+        logger.debug(f"  figure_lengths: {figure_lengths.shape}")
+        logger.debug(f"  labels_tensor: {labels_tensor.shape}")
+
+        # Forward pass
+        with torch.no_grad():
+            logits = model(
+                object_features_padded,
+                figure_features_padded,
+                group_features_tensor,
+                object_lengths,
+                figure_lengths,
+            )
+
+        logger.debug(f"Model output (logits) shape: {logits.shape}")
+
+        # Print outputs
+        print("Model Output (Logits):")
+        print(logits)
+        print("\nPredicted Probabilities:")
+        print(torch.sigmoid(logits))
+        print("\nTrue Labels:")
+        print(labels_tensor)
+
+        # Process only one batch for demonstration
+        break
 
 
 if __name__ == "__main__":

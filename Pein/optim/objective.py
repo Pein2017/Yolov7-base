@@ -1,7 +1,7 @@
 import logging
+import os
 import time
 
-import optuna
 from optuna.trial import Trial
 
 from data.data_factory import get_dataloader
@@ -10,6 +10,7 @@ from optim.search_space import define_search_space
 from trainer.bbu_ltn import DetectLtnModule
 from utils import Args
 from utils.helpers import generate_exp_setting
+from utils.logging import setup_logger
 from utils.training import setup_trainer_instance
 
 
@@ -25,10 +26,36 @@ def objective(trial: Trial, args: Args, study_name: str) -> float:
     Returns:
         float: Metric value to optimize.
     """
-    start_time = time.time()
+    # Get the global logger
+    global_logger = logging.getLogger("global_logger")
+
+    start_time = time.time()  # Record start time
 
     # Suggest hyperparameters
-    search_space = define_search_space(trial)
+    search_space = define_search_space(trial, args.direction)
+
+    # Generate experimental setting string
+    exp_setting = generate_exp_setting(args, search_space)
+
+    # Set up logger for this trial
+    trial_log_dir = os.path.join(
+        args.ltn_log_dir, study_name, "trial_logs", exp_setting
+    )
+    os.makedirs(trial_log_dir, exist_ok=True)
+    trial_log_file = os.path.join(trial_log_dir, f"trial_{trial.number}.log")
+    trial_logger = setup_logger(
+        log_file=trial_log_file,
+        name=f"trial_{trial.number}",
+        level="INFO",
+        log_to_console=False,
+        overwrite=True,
+    )
+
+    # Disable propagation to prevent trial logs from appearing in the global log
+    trial_logger.propagate = False
+
+    # Log trial start with 1-based indexing and current/total format using trial_logger
+    trial_logger.info(f"Starting Trial {trial.number + 1}/{args.n_trials}")
 
     # Load data with suggested hyperparameters
     dataloaders = get_dataloader(
@@ -46,127 +73,116 @@ def objective(trial: Trial, args: Args, study_name: str) -> float:
 
     # Update args with suggested hyperparameters
     args.lr = search_space["lr"]
-    args.optimizer = search_space[
-        "optimizer"
-    ]  # Ensuring optimizer is up-to-date if not fixed
+    args.optimizer = search_space["optimizer"]
     args.num_layers = search_space["num_layers"]
 
-    # Set selection_criterion from search space or existing args
-    selection_criterion = args.selection_criterion or search_space.get(
-        "selection_criterion", "avg_error"
-    )
+    if args.selection_criterion is None:
+        raise ValueError("selection_criterion is not set")
+
+    selection_criterion = args.selection_criterion
+
+    # Set selection_criterion as a trial user attribute
+    trial.set_user_attr("selection_criterion", selection_criterion)
+
+    # Adjust attn_heads to ensure it divides embedding_dim
+    embedding_dim = search_space["embedding_dim"]
+    suggested_attn_heads = search_space["attn_heads"]
+
+    def find_largest_divisor(n, max_val):
+        for i in range(max_val, 0, -1):
+            if n % i == 0:
+                return i
+        return 1  # Fallback to 1 if no divisor found
+
+    attn_heads = find_largest_divisor(embedding_dim, suggested_attn_heads)
+
+    # Update search_space with adjusted attn_heads
+    search_space["attn_heads"] = attn_heads
 
     # Create model with suggested hyperparameters
     model = DetectionClassificationModel(
         num_classes=args.num_classes,
-        num_labels=args.num_labels,
-        PAD_LABEL=args.PAD_LABEL,
-        SEP_LABEL=args.SEP_LABEL,
-        embedding_dim=search_space["embedding_dim"],
+        embedding_dim=embedding_dim,
         hidden_dim=search_space["hidden_dim"],
-        attn_heads=search_space["attn_heads"],
+        attn_heads=attn_heads,
         fc_hidden_dims=search_space["fc_hidden_dims"],
         num_layers=search_space["num_layers"],
         dropout=search_space["dropout"],
     )
 
-    # Initialize DetectLtnModule
-    detect_ltn_module = DetectLtnModule(args, model)
-
-    # Generate experimental setting string
-    exp_setting = generate_exp_setting(args, search_space)
-
-    # Set up trainer
-    trainer = setup_trainer_instance(args, trial.number, study_name, exp_setting)
-
-    # Log trial start
-    current_trial = trial.number + 1
-    total_trials = args.n_trials
-    logging.getLogger("train_optuna").info(
-        f"Starting Trial {current_trial}/{total_trials}"
+    # Initialize DetectLtnModule without passing trial
+    detect_ltn_module = DetectLtnModule(
+        args,
+        model,
+        trial_logger=trial_logger,
     )
 
-    best_metric = float("inf")
-    best_epoch = None
-    logger = logging.getLogger("train_optuna")
+    # Set up trainer
+    trainer = setup_trainer_instance(args, study_name, exp_setting)
 
-    for epoch in range(args.num_epochs):
-        trainer.fit(detect_ltn_module, train_loader, val_loader)
+    # Fit the model (trainer.fit handles multiple epochs)
+    trainer.fit(detect_ltn_module, train_loader, val_loader)
 
-        # Get the current metrics
-        current_val_metric = detect_ltn_module.best_metrics["val"].get(
-            selection_criterion
+    # Retrieve the best metrics and records after training
+    best_metrics = detect_ltn_module.get_best_metrics()
+    best_val_records = detect_ltn_module.best_val_records
+    best_val_cheat_records = detect_ltn_module.best_val_cheat_records
+
+    # Record best_selection_criterion and best_epoch for each relevant phase
+    # {{ edit_1 }}
+    # Setting attributes only for 'val' and 'val_cheat' phases
+    if best_val_records:
+        # Assuming the latest best_val_record is the best one
+        best_val_epoch = max(best_val_records.keys())
+        best_val_record = best_val_records[best_val_epoch]
+        trial.set_user_attr("best_val_epoch", best_val_epoch)
+        trial.set_user_attr("val_value", best_val_record["val_cheat_select_criterion"])
+        trial.set_user_attr("train_value", best_val_record["train_select_criterion"])
+    else:
+        trial.set_user_attr("best_val_epoch", None)
+        trial.set_user_attr("val_value", None)
+        trial.set_user_attr("train_value", None)
+
+    if best_val_cheat_records:
+        # Assuming the latest best_val_cheat_record is the best one
+        best_val_cheat_epoch = max(best_val_cheat_records.keys())
+        best_val_cheat_record = best_val_cheat_records[best_val_cheat_epoch]
+        trial.set_user_attr("best_val_cheat_epoch", best_val_cheat_epoch)
+        trial.set_user_attr(
+            "val_cheat_value", best_val_cheat_record["val_select_criterion"]
         )
-        current_val_fp_over = detect_ltn_module.best_metrics["val"].get("fp_over_tp_fp")
-        current_val_fn_over = detect_ltn_module.best_metrics["val"].get("fn_over_fn_tn")
-        current_val_cheat_metric = detect_ltn_module.best_metrics["val_cheat"].get(
-            selection_criterion
-        )
-        current_val_cheat_fp_over = detect_ltn_module.best_metrics["val_cheat"].get(
-            "fp_over_tp_fp"
-        )
-        current_val_cheat_fn_over = detect_ltn_module.best_metrics["val_cheat"].get(
-            "fn_over_fn_tn"
-        )
-
-        # Only consider metrics after valid_epoch
-        if epoch + 1 >= args.valid_epoch:
-            if current_val_metric is not None and current_val_cheat_metric is not None:
-                trial.report(current_val_metric, epoch)
-
-                # Handle pruning based on the intermediate value
-                if trial.should_prune():
-                    logger.info(f"Trial {trial.number} pruned at epoch {epoch + 1}")
-                    raise optuna.TrialPruned()
-
-                # Update best_metric and best_epoch
-                if current_val_metric < best_metric:
-                    best_metric = current_val_metric
-                    best_epoch = epoch + 1
-
-                    # Set user attributes
-                    trial.set_user_attr("best_epoch", best_epoch)
-                    trial.set_user_attr("selection_criterion", selection_criterion)
-                    trial.set_user_attr(selection_criterion, best_metric)
-                    trial.set_user_attr("fp_over_tp_fp", current_val_fp_over)
-                    trial.set_user_attr("fn_over_fn_tn", current_val_fn_over)
-                    trial.set_user_attr(
-                        f"val_cheat_{selection_criterion}", current_val_cheat_metric
-                    )
-                    trial.set_user_attr(
-                        "val_cheat_fp_over_tp_fp", current_val_cheat_fp_over
-                    )
-                    trial.set_user_attr(
-                        "val_cheat_fn_over_fn_tn", current_val_cheat_fn_over
-                    )
-
-                # Log info after log_after_epoch
-                if epoch + 1 >= args.log_after_epoch:
-                    logger.info(
-                        f"Epoch {epoch + 1}: "
-                        f"val_{selection_criterion} = {current_val_metric:.4f}, "
-                        f"val_fp_over = {current_val_fp_over:.4f}, "
-                        f"val_fn_over = {current_val_fn_over:.4f}, "
-                        f"val_cheat_{selection_criterion} = {current_val_cheat_metric:.4f}, "
-                        f"val_cheat_fp_over = {current_val_cheat_fp_over:.4f}, "
-                        f"val_cheat_fn_over = {current_val_cheat_fn_over:.4f}"
-                    )
-            else:
-                logger.warning(f"No valid metric found at epoch {epoch + 1}")
-
-    # Calculate duration
-    duration = time.time() - start_time
-
-    # Log trial completion
-    if best_epoch is not None:
-        logger.info(
-            f"Completed Trial {trial.number + 1}/{args.n_trials} in {duration:.2f} seconds "
-            f"with {selection_criterion}: {best_metric:.4f} at epoch {best_epoch}"
+        trial.set_user_attr(
+            "train_value_cheat", best_val_cheat_record["train_select_criterion"]
         )
     else:
-        logger.info(
-            f"Completed Trial {trial.number + 1}/{args.n_trials} in {duration:.2f} seconds "
-            f"but did not reach valid epoch {args.valid_epoch}"
-        )
+        trial.set_user_attr("best_val_cheat_epoch", None)
+        trial.set_user_attr("val_cheat_value", None)
+        trial.set_user_attr("train_value_cheat", None)
+    # {{ end_edit_1 }}
 
-    return best_metric if best_metric != float("inf") else float("inf")
+    # Determine if the trial is valid based on best_epoch and valid_epoch
+    if args.valid_epoch is not None:
+        if_valid = (
+            best_metrics["val"]["epoch"] > args.valid_epoch
+            or best_metrics["val_cheat"]["epoch"] > args.valid_epoch
+        )
+    else:
+        if_valid = True  # Treat as valid if valid_epoch is not set
+
+    trial.set_user_attr("if_valid", str(if_valid))
+
+    # Ensure 'val_cheat' metrics are considered in validity
+    for phase in ["train", "val", "val_cheat"]:
+        if phase not in best_metrics:
+            global_logger.error(f"Unexpected phase '{phase}' encountered.")
+            raise ValueError(f"Unexpected phase '{phase}' encountered.")
+
+    end_time = time.time()  # Record end time
+    duration = end_time - start_time
+    minutes, seconds = divmod(duration, 60)
+    # Log trial completion with current/total and formatted duration using trial_logger
+    trial_logger.info(
+        f"Complete trial {trial.number + 1}/{args.n_trials} in {int(minutes)}m:{int(seconds)}s"
+    )
+
+    return best_metrics["val"][args.selection_criterion] if if_valid else int(100)
