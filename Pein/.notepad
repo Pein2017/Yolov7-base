@@ -1,0 +1,61 @@
+# AI Development Framework Guidelines
+
+## Objective
+Develop a standardized, modular framework for managing AI development projects, emphasizing scalability, reusability, and efficient multi-task execution.
+
+## Core Components
+
+1. Customized Development
+   - `data`: Manage datasets and data processing
+     - Dataset loading and handling
+     - Data preprocessing and augmentation
+   - `models`: Define model architectures
+     - Specific model implementations (e.g., CNN, RNN, Transformer)
+   - `ltn_logs`: Store Lightning module logs
+     - Organized by experiment and trial
+
+2. Standardized Components
+   - `optim`: Handle optimization and hyperparameter tuning
+     - Custom optimizers
+     - Hyperparameter search strategies (e.g., grid search, random search, Bayesian optimization)
+   - `trainer`: Manage training processes
+     - PyTorch Lightning modules
+     - Custom callbacks
+     - Multi-task training support
+   - `utils`: Provide utility functions and shared resources
+     - Logging utilities
+     - Metric
+
+## Key Features
+
+1. Scalable Architecture
+   - Ensure coherent dependencies between `optim`, `trainer`, and `utils`
+   - Maximize code reuse for a flexible, extensible framework
+
+2. Multi-Task Execution
+   - Support concurrent task execution
+   - Utilize shared Optuna database for hyperparameter optimization
+   - Enable multi-GPU and multi-process capabilities
+
+3. Logging Hierarchy
+   - Global Logger: Manage metrics across all trials
+   - Trial Logger: Handle common logs during individual training processes
+
+4. Component Separation
+   - Trainer (PyTorch Lightning Module):
+     - Focus on epoch-wise routine records
+     - Manage training-specific logging
+   - Optimizer:
+     - Extract high-level information from the trainer
+     - Conduct operations outside the Lightning module
+     - Handle global logging for best performances
+
+5. Metric Handling
+   - Implement robust system for logging and analyzing metrics at each epoch
+
+## Implementation Notes
+
+- Maintain clear separation of concerns between components
+- Ensure modularity for easy updates and extensions
+- Optimize for performance in multi-task, multi-GPU environments
+- Implement comprehensive error handling and logging

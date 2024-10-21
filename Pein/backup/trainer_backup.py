@@ -6,8 +6,8 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from dataset.data_factory import get_dataloader
-from model.classifier_2 import DetectionClassificationModel
+from data.data_factory import get_dataloader
+from models.classifier_2 import DetectionClassificationModel
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 
@@ -563,11 +563,11 @@ def main():
     )
 
     # Get PAD_LABEL, SEP_LABEL, num_classes, and num_labels from the dataset
-    dataset = train_loader.dataset
-    PAD_LABEL = dataset.PAD_LABEL
-    SEP_LABEL = dataset.SEP_LABEL
-    num_classes = dataset.num_classes
-    num_labels = dataset.num_labels
+    # dataset = train_loader.dataset
+    # PAD_LABEL = dataset.PAD_LABEL
+    # SEP_LABEL = dataset.SEP_LABEL
+    # num_classes = dataset.num_classes
+    # num_labels = dataset.num_labels
 
     model = build_model(args, train_loader.dataset)
 
